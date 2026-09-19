@@ -260,7 +260,7 @@ void stateManagement(unsigned long ct){
 void loop() {
 
   unsigned long ct = millis();
-  static unsigned long p = 0;
+
   ReadDistance(ct);
   DisplayDistance(ct);
   stateManagement(ct);
