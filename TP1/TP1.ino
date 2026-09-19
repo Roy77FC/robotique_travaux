@@ -118,3 +118,4 @@ void drawName(){
   display.setCursor(0, 50);      // position du texte
   display.println("Fonseca Cabarcas");
 }
+
