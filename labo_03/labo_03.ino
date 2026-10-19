@@ -24,11 +24,11 @@ MeEncoderOnBoard encoderRight(SLOT1);
 MeEncoderOnBoard encoderLeft(SLOT2);
 
 // Déclaration des leds
-#define LEDNUM  13 // J'ai mis 13 leds pour que la fonction "getColorAt" tienne en compte la led 12
+#define LEDNUM  12
 #define LED_PIN 44
 
 MeRGBLed led( 0, LEDNUM );
-int completedLedsProgession = -1;
+int completedLedsProgession = 0;
 int progressiveBar[7] = {0, 1, 2, 3, 4, 5, 6};
 int completedLeds[3] = {11, 10, 9};
 
@@ -136,6 +136,7 @@ void goStraight(short speed = 100, short firstRun = 0) {
 
     encoderLeft.setTarPWM(speed);
     encoderRight.setTarPWM(-speed);
+    previousError = 0;
 
     return;
   }
@@ -169,15 +170,29 @@ void stop() {
 void setDistanceToMove(int dist){
   distToGoDeg = dist / CIRC_WHEEL * 360;
 
-  initEncLeftDeg = encoderLeft.getCurPos();
-  initEncRightDeg = encoderRight.getCurPos();
+  initEncLeftDeg = abs(encoderLeft.getCurPos());
+  initEncRightDeg = abs(encoderRight.getCurPos());
   goStraight(100, 1);
 }
 
-void distanceTask(){
+bool distanceTask(){
 
-  long actualPosition = (abs(encoderLeft.getCurPos()) + abs(encoderRight.getCurPos())) / 2.0;
-  long initialPosition = (abs(initEncLeftDeg + initEncRightDeg)) / 2.0;
+  int curEncLeftDeg = abs(encoderLeft.getCurPos());
+  int curEncRightDeg = abs(encoderRight.getCurPos());
+  long actualPosition = (curEncLeftDeg + curEncRightDeg) / 2.0;
+  long initialPosition = (initEncLeftDeg + initEncRightDeg) / 2.0;
+
+  bool isThereADiff = curEncLeftDeg < initEncLeftDeg || curEncRightDeg < initEncRightDeg;
+  int diff;
+
+  if(curEncLeftDeg < initEncLeftDeg) diff = initEncLeftDeg - curEncLeftDeg;
+  else if(curEncRightDeg < initEncRightDeg) diff = initEncRightDeg - curEncRightDeg;
+  else actualPosition = (curEncLeftDeg + curEncRightDeg) / 2.0;
+  
+
+  if(isThereADiff){
+    actualPosition = (curEncLeftDeg + diff + curEncRightDeg) / 2.0;
+  }
 
   float remaining = distToGoDeg - abs(initialPosition - actualPosition);
   // Serial.print("But: ");
@@ -191,50 +206,16 @@ void distanceTask(){
 
   if(remaining <= 0){
     stop();
-    return;
+    return true;
   }
 
   int speed = constrain(remaining * 0.5, 40, 100);
   goStraight(speed);
+
+  return false;
 }
 
-void stateManagement(unsigned long ct){
 
-  static AppState callingState;
-
-  switch(currentState){
-
-    case SETUP:
-      setupState(ct);
-    break;
-
-    case SEGA:
-      callingState = currentState;
-      segA_And_SegCState();
-      
-    break;
-
-    case SEGB:
-      callingState = currentState;
-      segA_And_SegCState();
-      
-    break;
-
-    case SEGC:
-      callingState = currentState;
-      segBState();
-      
-    break;
-
-    case PIVOT:
-      pivotState(callingState);
-    break;
-
-    case FIN:
-      finState();
-    break;
-  }
-}
 
 void loop() {
   currentTime = millis();
@@ -303,14 +284,29 @@ void progressiveBarTask(bool isAccurate){
     long initialPosition = (abs(initEncLeftDeg + initEncRightDeg)) / 2.0;
 
     float remaining = distToGoDeg - abs(initialPosition - actualPosition);
-    leds = map(remaining, initialPosition, distToGoDeg, 0, nbLeds);
+    leds = map(remaining, 0, distToGoDeg, 0, nbLeds);
+
+    // Serial.print("ACT: ");
+    // Serial.print(actualPosition);
+    // Serial.print(" INIT: ");
+    // Serial.print(initialPosition);
+    // Serial.print(" WheelDeg: ");
+    // Serial.print(distToGoDeg);
+    // Serial.print(" LEDS: ");
+    // Serial.print(leds);
+    // Serial.print(" remainig: ");
+    // Serial.println(remaining);
+    
     static int previousLedValue = -1;
+
+    if(leds < previousLedValue){
+      led.setColor(0,0);
+    }
     
     if(previousLedValue != leds){
       for(int i = leds; i < nbLeds; i++){
         led.setColorAt(i, 0, 0, 25);
       }
-
       previousLedValue = leds;
     }
 
@@ -334,16 +330,20 @@ void progressiveBarTask(bool isAccurate){
       previousLedValue = leds;
     }   
   }
-
   led.show();
 }
 
 void completedLedsTask(){
+  //led.setColor(0,0);
 
-  led.setColor(0,0);
-  if(completedLedsProgession != -1){
+  if(completedLedsProgession != 0){
+
     for(int i = 0; i < completedLedsProgession; i++){
-      led.setColorAt(completedLeds[completedLedsProgession], 0, 35, 0);
+      led.setColorAt(completedLeds[i], 0, 35, 0);
+      Serial.print("Leds: ");
+      Serial.print(completedLedsProgession);
+      Serial.print(" I: ");
+      Serial.println(i);
     }
     led.show();
   }
@@ -377,84 +377,55 @@ void pivotState(AppState callingState){
 
   static bool isSpinCalled = false;
   
-  static long initEncLeftPos;
-  static long initEncRightPos;
-  long currEncLeftPos = abs(encoderLeft.getCurPos());
-  long currEncRightPos = abs(encoderRight.getCurPos());
+  static long initL;
+  static long initR;  
 
   int degToSpin = callingState == SEGC? 183 : 93;
-  AppState stateToSwtich;
+  float wheelDegGoal = degToSpin * FULL_SPIN_CIRC / CIRC_WHEEL;
 
   if(!isSpinCalled){
-    callingState == SEGB? spinTask(degToSpin * -1) : spinTask(degToSpin);
+    callingState != SEGB? spinTask(degToSpin * -1) : spinTask(degToSpin);
     isSpinCalled = true;
-    initEncLeftPos = abs(encoderLeft.getCurPos());
-    initEncRightPos = abs(encoderRight.getCurPos());
+    initL = encoderLeft.getCurPos();
+    initR = encoderRight.getCurPos();
   }
 
-  long currentPos = -1;
-  long initialPos = -1;
+  long moveLeft = abs(encoderLeft.getCurPos() - initL);
+  long moveRight = abs(encoderRight.getCurPos() - initR);
+  float moved = (moveLeft + moveRight) / 2.0;
 
-  if(currEncLeftPos < initEncLeftPos){
-
-    int diff = initEncLeftPos - currEncLeftPos;
-
-    currentPos = (currEncLeftPos + diff + currEncRightPos) / 2.0;
-    initialPos = (initEncLeftPos + initEncRightPos) / 2.0;
-
-  }else if(currEncRightPos < initEncRightPos){
-
-    int diff = initEncRightPos - currEncRightPos;
-
-    currentPos = (currEncRightPos + diff + currEncLeftPos) / 2.0;
-    initialPos = (initEncLeftPos + initEncRightPos) / 2.0;
-  }
-
-  switch(callingState){
-    case SEGA:      
-      stateToSwtich = SEGB;
-    break;
-
-    case SEGB:
-      stateToSwtich = SEGC;
-    break;
-      
-    case SEGC:
-      stateToSwtich = FIN;
-    break;
-  }
-
-  Serial.print("P Ini: ");
-  Serial.print(initialPos);
-  Serial.print(" P Act: ");
-  Serial.print(currentPos);
-  Serial.print(" Diff: ");
-  Serial.println(currentPos - initialPos);
-
-  // Serial.println(stateToSwtich);
-
-  if(currentPos - initialPos >= degToSpin && currentPos!= -1){
+  if(moved >= wheelDegGoal - 10){
     isSpinCalled = false;
-    currentState = stateToSwtich;
+    currentState = FIN;
+    if(callingState == SEGA) currentState = SEGB;
+    else if(callingState == SEGB) currentState = SEGC;
   }
+
+  // Serial.print("MOV L: ");
+  // Serial.print(moveLeft);
+  // Serial.print(" MOV R: ");
+  // Serial.print(moveRight);
+  // Serial.print(" WheelDeg: ");
+  // Serial.print(wheelDegGoal);
+  // Serial.print(" moved: ");
+  // Serial.println(moved);  
 }
 
-void segA_And_SegCState() {
+void segA_And_SegCState(int distToMove = 1000) {
 
   static bool firstCall = true;
 
-  if(encoderLeft.getCurPwm() == 0 && !firstCall){
-    currentState = PIVOT;
-    firstCall = true;
-    completedLedsProgession++;
-    completedLedsTask();
-  }
-
   if(firstCall){
     firstCall = false;
-    setDistanceToMove(1000);
+    setDistanceToMove(distToMove);
   }else{
-    distanceTask();
+    if(distanceTask()){
+      currentState = PIVOT;
+      firstCall = true;
+      completedLedsProgession++;
+      completedLedsTask();
+      Serial.println("Ça rentre");
+    }
   }
 
   progressiveBarTask(true);
@@ -462,16 +433,25 @@ void segA_And_SegCState() {
 
 void segBState() {
 
+  static bool firstCall = true;
+
   if(distanceUltraSon <= TOO_NEAR_DIST){
 
     stop();
     currentState = PIVOT;
     completedLedsProgession++;
     completedLedsTask();
+    Serial.println("Ça rentre");
+    firstCall = true;
 
   }else{
 
-    goStraight();
+    if(firstCall){
+      goStraight(100, firstCall);
+      firstCall = false;
+    }else{
+      goStraight();
+    }
   }
 
   progressiveBarTask(false);
@@ -479,6 +459,51 @@ void segBState() {
 
 void finState(){
 
-  for(int i = 0; i < LEDNUM -1; i++){
+  for(int i = 0; i < LEDNUM; i++){
     led.setColorAt(i, 25, 0, 0);
-  }}
+  }
+
+  led.show();
+}
+
+void stateManagement(unsigned long ct){
+
+  static AppState callingState;
+
+  switch(currentState){
+
+    case SETUP:
+      setupState(ct);
+    break;
+
+    case SEGA:
+      callingState = currentState;
+      segA_And_SegCState();
+      
+    break;
+
+    case SEGB:
+      callingState = currentState;
+      segBState();
+      
+    break;
+
+    case SEGC:
+      callingState = currentState;
+      segA_And_SegCState();
+      
+    break;
+
+    case PIVOT:
+      pivotState(callingState);
+    break;
+
+    case FIN:
+      finState();
+    break;
+  }
+
+  if(currentState != FIN){
+    completedLedsTask();
+  }
+}
