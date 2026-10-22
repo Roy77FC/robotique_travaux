@@ -31,6 +31,7 @@ MeRGBLed led( 0, LEDNUM );
 int completedLedsProgession = 0;
 int progressiveBar[7] = {0, 1, 2, 3, 4, 5, 6};
 int completedLeds[3] = {11, 10, 9};
+int finLeds[5] = {11, 10, 9, 8, 7};
 
 // Déclaration du ultrasonSensor
 int distanceUltraSon = 0;
@@ -48,6 +49,11 @@ String msg = "";
 int distToGoDeg = 0;
 long initEncLeftDeg = 0;
 long initEncRightDeg = 0;
+
+int distSegA = 1000;
+int distSegC = 1000;
+
+const int FLASHING_FREC = 10;
 
 
 // ********* INTERRUPTIONS ***********
@@ -109,7 +115,22 @@ void setup() {
   gyro.begin();
 
   led.setpin(LED_PIN);
-  delay(2000);
+  // delay(2000);
+  // spinTask(195);
+}
+
+
+void loop() {
+  currentTime = millis();
+
+  ReadDistance(currentTime);
+
+  stateManagement(currentTime);
+  gyroTask(currentTime);
+  encodersTask(currentTime);
+  
+
+  // Serial.println(currentState);
 }
 
 void goStraight(short speed = 100, short firstRun = 0) {
@@ -124,9 +145,9 @@ void goStraight(short speed = 100, short firstRun = 0) {
   // higher kp = plus réactive, peu osciller
   // lowewr kp = sluggish, moins d'oscillation
   // higher kd = limite l'oscillation, la bonne valeur arrête l'oscillation
-  const double kp = 3.0;
+  const double kp = 3.5;
   //const double ki = 1.0;
-  const double kd = 1.5;
+  const double kd = 6.0;
 
   if (firstRun) {
     firstRun = 0;
@@ -213,20 +234,6 @@ bool distanceTask(){
   goStraight(speed);
 
   return false;
-}
-
-
-
-void loop() {
-  currentTime = millis();
-
-  ReadDistance(currentTime);
-
-  stateManagement(currentTime);
-  gyroTask(currentTime);
-  encodersTask(currentTime);
-
-  // Serial.println(currentState);
 }
 
 
@@ -340,10 +347,6 @@ void completedLedsTask(){
 
     for(int i = 0; i < completedLedsProgession; i++){
       led.setColorAt(completedLeds[i], 0, 35, 0);
-      Serial.print("Leds: ");
-      Serial.print(completedLedsProgession);
-      Serial.print(" I: ");
-      Serial.println(i);
     }
     led.show();
   }
@@ -353,7 +356,6 @@ void completedLedsTask(){
 
 void setupState(unsigned long ct) {
   static bool firstTime = true;
-  static unsigned long lastTime = 0;
   static unsigned long exitTime = 0;
 
   const int timeout = 3000;
@@ -373,14 +375,19 @@ void setupState(unsigned long ct) {
   }
 }
 
-void pivotState(AppState callingState){
+void pivotState(AppState callingState, unsigned long ct){
 
   static bool isSpinCalled = false;
-  
+  static bool isTimeTaked = false;
+  int tolerance = 10;
+  int degAdjustLeftPivot = 8;
+  int degAdjustRightPivot = 12;
   static long initL;
-  static long initR;  
+  static long initR;
+  int waitTime = 1000;  
+  static unsigned long exitTime = 0;
 
-  int degToSpin = callingState == SEGC? 183 : 93;
+  int degToSpin = callingState == SEGC? 188 : 95;
   float wheelDegGoal = degToSpin * FULL_SPIN_CIRC / CIRC_WHEEL;
 
   if(!isSpinCalled){
@@ -394,8 +401,22 @@ void pivotState(AppState callingState){
   long moveRight = abs(encoderRight.getCurPos() - initR);
   float moved = (moveLeft + moveRight) / 2.0;
 
-  if(moved >= wheelDegGoal - 10){
+  // if(moved >= wheelDegGoal - tolerance){
+  //   isSpinCalled = false;
+  //   currentState = FIN;
+  //   if(callingState == SEGA) currentState = SEGB;
+  //   else if(callingState == SEGB) currentState = SEGC;
+  // }
+
+  // set the time to wait for switch
+  if(moved >= (wheelDegGoal - tolerance) && !isTimeTaked){
+    exitTime = ct + waitTime;
+    isTimeTaked = true;
+  }
+
+  if(ct >= exitTime && isTimeTaked){
     isSpinCalled = false;
+    isTimeTaked = false;
     currentState = FIN;
     if(callingState == SEGA) currentState = SEGB;
     else if(callingState == SEGB) currentState = SEGC;
@@ -457,11 +478,27 @@ void segBState() {
   progressiveBarTask(false);
 }
 
-void finState(){
+void finState(unsigned long ct){
 
-  for(int i = 0; i < LEDNUM; i++){
-    led.setColorAt(i, 25, 0, 0);
+  static unsigned long previousTime = 0;
+  int rate = (1.0 / FLASHING_FREC) * 1000;
+  int ledTabSize = sizeof(finLeds) / sizeof(finLeds[0]);
+  static bool isOn = false;
+
+  if(ct - previousTime >= rate){
+    if(isOn){
+      led.setColor(0,0);
+      isOn = false;
+    }else{
+      for(int i = 0; i < ledTabSize; i++){
+        led.setColorAt(finLeds[i], 0, 25, 0);
+      }
+      isOn = true;
+    }
+
+    previousTime = ct;
   }
+  
 
   led.show();
 }
@@ -478,7 +515,7 @@ void stateManagement(unsigned long ct){
 
     case SEGA:
       callingState = currentState;
-      segA_And_SegCState();
+      segA_And_SegCState(distSegA);
       
     break;
 
@@ -490,16 +527,16 @@ void stateManagement(unsigned long ct){
 
     case SEGC:
       callingState = currentState;
-      segA_And_SegCState();
+      segA_And_SegCState(distSegC);
       
     break;
 
     case PIVOT:
-      pivotState(callingState);
+      pivotState(callingState, ct);
     break;
 
     case FIN:
-      finState();
+      finState(ct);
     break;
   }
 
