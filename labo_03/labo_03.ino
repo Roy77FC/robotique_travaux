@@ -44,17 +44,20 @@ unsigned long currentTime = 0;
 
 unsigned long serialPrintPrevious = 0;
 int serialPrintInterval = 500;
-String msg = "";
 
 int distToGoDeg = 0;
 long initEncLeftDeg = 0;
 long initEncRightDeg = 0;
 
-int distSegA = 1000;
-int distSegC = 1000;
+int distanceFoward = 1500;
 
 const int FLASHING_FREC = 10;
+const float ANGLE_TOLERANCE_DEG = 3.0;
+const int MIN_PWM = 30;        
+const int PIVOT_SPEED = 45;   
 
+// Angle Z cumulatif (ne revient pas à -180 après 180)
+double zAngle = 0.0;
 
 // ********* INTERRUPTIONS ***********
 
@@ -115,27 +118,14 @@ void setup() {
   gyro.begin();
 
   led.setpin(LED_PIN);
-  // delay(2000);
-  // spinTask(195);
-}
-
-
-void loop() {
-  currentTime = millis();
-
-  ReadDistance(currentTime);
-
-  stateManagement(currentTime);
-  gyroTask(currentTime);
-  encodersTask(currentTime);
-  
-
-  // Serial.println(currentState);
 }
 
 void goStraight(short speed = 100, short firstRun = 0) {
-  static double zAngleGoal = 0.0;
 
+  static unsigned long previousTime = 0;
+  const short RATE = 20;
+
+  static double zAngleGoal = 0.0;
   static double error = 0.0;
   static double previousError = 0.0;
   static double output = 0;
@@ -145,14 +135,15 @@ void goStraight(short speed = 100, short firstRun = 0) {
   // higher kp = plus réactive, peu osciller
   // lowewr kp = sluggish, moins d'oscillation
   // higher kd = limite l'oscillation, la bonne valeur arrête l'oscillation
-  const double kp = 3.5;
+  const double kp = 4.0;
   //const double ki = 1.0;
-  const double kd = 6.0;
+  const double kd = 10.0;
+
+  unsigned long ct = millis();
 
   if (firstRun) {
-    firstRun = 0;
 
-    zAngleGoal = gyro.getAngleZ();
+    zAngleGoal = zAngle;
     Serial.println ("Setting speed");
 
     encoderLeft.setTarPWM(speed);
@@ -162,7 +153,11 @@ void goStraight(short speed = 100, short firstRun = 0) {
     return;
   }
 
-  error = gyro.getAngleZ() - zAngleGoal;
+  //if(ct - previousTime >= RATE) return;
+
+  previousTime = ct;
+
+  error = zAngle - zAngleGoal;
 
   // Google : ELI5 PID
   // Astuce web : ELI5 = Explain Like I'm 5
@@ -170,22 +165,35 @@ void goStraight(short speed = 100, short firstRun = 0) {
 
   previousError = error;
 
-  msg = "z : ";
-  msg += gyro.getAngleZ();
-  msg += "\tleft : ";
-  msg += encoderLeft.getCurPwm();
-  msg += "\tright : ";
-  msg += encoderRight.getCurPwm();
-  msg += "\toutput :";
-  msg += output;
+  // Serial.print("error: ");
+  // Serial.print(error);
+  // Serial.print(" vitesse: ");
+  // Serial.print(speed - output);
+  // Serial.print(" Goal: ");
+  // Serial.print(zAngleGoal);
+  // Serial.print(" zAngle");
+  // Serial.println(zAngle);
 
   encoderLeft.setTarPWM(speed - output);
   encoderRight.setTarPWM(-speed - output);
 }
 
-void stop() {
+void loop() {
+  currentTime = millis();
+
+  ReadDistance(currentTime);
+  static bool f = true;
+  stateManagement(currentTime);
+  gyroTask(currentTime);
+  encodersTask(currentTime);
+}
+
+
+void stopMotors() {
   encoderLeft.setTarPWM(0);
   encoderRight.setTarPWM(0);
+  encoderLeft.setMotorPwm(0);   
+  encoderRight.setMotorPwm(0);
 }
 
 void setDistanceToMove(int dist){
@@ -194,6 +202,53 @@ void setDistanceToMove(int dist){
   initEncLeftDeg = abs(encoderLeft.getCurPos());
   initEncRightDeg = abs(encoderRight.getCurPos());
   goStraight(100, 1);
+}
+
+int limitSpeed(float value, int maxSpeed) {
+
+  value = constrain(value, -maxSpeed, maxSpeed);
+
+  if (fabs(value) < MIN_PWM) {
+    value = value < 0 ? -MIN_PWM : MIN_PWM;
+  }
+  return (int)value;
+}
+
+void ReadDistance(unsigned long ct){
+
+  static unsigned long previousTime = 0;
+
+  if(ct - previousTime >= RATE_READ){
+    distanceUltraSon = distSensor.distanceCm();
+    previousTime = ct;
+  }
+}
+
+// ---------------------------------------------------------- Tasks functions ----------------------------------------------------------
+void gyroTask(unsigned long ct) {
+  static double previousZ = 0.0;
+  static bool firstTime = true;
+
+  gyro.update();
+  double z = gyro.getAngleZ();
+
+  if (firstTime) {
+    firstTime = false;
+    previousZ = z;
+    return;
+  }
+
+  double delta = z - previousZ;
+  if (delta > 180) delta -= 360;
+  else if (delta < -180) delta += 360;
+
+  zAngle += delta;
+  previousZ = z;
+}
+
+void encodersTask(unsigned long ct) {
+  encoderRight.loop();
+  encoderLeft.loop();
 }
 
 bool distanceTask(){
@@ -226,7 +281,7 @@ bool distanceTask(){
   // Serial.println(remaining);
 
   if(remaining <= 0){
-    stop();
+    stopMotors();
     return true;
   }
 
@@ -234,52 +289,6 @@ bool distanceTask(){
   goStraight(speed);
 
   return false;
-}
-
-
-void gyroTask(unsigned long ct) {
-  gyro.update();
-}
-
-void encodersTask(unsigned long ct) {
-  encoderRight.loop();
-  encoderLeft.loop();
-}
-
-// void stopCmd() {
-//   Serial.println ("Stopping");
-//   msg = "";
-
-//   currentState = STOP;
-// }
-
-void spinTask(int goal) {
-
-  float ratioSpin = (goal * 1.0) / 360;
-  
-  // Distance à parcourir
-  float dist = ratioSpin * FULL_SPIN_CIRC;
-  
-  // Nombre de rotations de chaque roue
-  float nbRots = dist/CIRC_WHEEL;
-  
-  // On multiplie par 360 pour obtenir
-  // le nombre de degrés
-  float angleLeft = nbRots * 360;
-  float angleRight = angleLeft;
-  
-  encoderLeft.move(angleLeft);
-  encoderRight.move(angleRight);
-}
-
-void ReadDistance(unsigned long ct){
-
-  static unsigned long previousTime = 0;
-
-  if(ct - previousTime >= RATE_READ){
-    distanceUltraSon = distSensor.distanceCm();
-    previousTime = ct;
-  }
 }
 
 void progressiveBarTask(bool isAccurate){
@@ -352,7 +361,53 @@ void completedLedsTask(){
   }
 }
 
-// State functions ----------------------------------------------------------
+bool pivotTask(unsigned long ct, float angleDeg, int speed, bool init = false) {
+  static unsigned long previousTime = 0;
+  const unsigned long rate = 20;
+
+  static double zAngleGoal = 0.0;
+  static double previousError = 0.0;
+
+  const double kp = 2.0;
+  const double kd = 10.0;
+
+  if (init) {
+    previousTime = ct;
+    zAngleGoal = zAngle + angleDeg;   // cible = angle actuel + rotation voulue
+    previousError = angleDeg;
+    return false;
+  }
+
+  if (ct - previousTime < rate) return false;
+  previousTime = ct;
+
+  double error = zAngleGoal - zAngle;
+
+  if (fabs(error) <= ANGLE_TOLERANCE_DEG) {
+    stopMotors();
+    return true;
+  }
+
+  double output = kp * error + kd * (error - previousError);
+  previousError = error;
+
+  int pivotSpeed = limitSpeed(output, speed);
+
+  // Serial.print("error: ");
+  // Serial.print(error);
+  // Serial.print(" vitesse: ");
+  // Serial.print(pivotSpeed);
+  // Serial.print(" zAngle");
+  // Serial.println(zAngle);
+
+  // Même signe sur les deux roues = rotation sur place
+  encoderLeft.setTarPWM(pivotSpeed);
+  encoderRight.setTarPWM(pivotSpeed);
+
+  return false;
+}
+
+// ---------------------------------------------------------- State functions ----------------------------------------------------------
 
 void setupState(unsigned long ct) {
   static bool firstTime = true;
@@ -373,63 +428,6 @@ void setupState(unsigned long ct) {
     firstTime = true;
     currentState = SEGA;
   }
-}
-
-void pivotState(AppState callingState, unsigned long ct){
-
-  static bool isSpinCalled = false;
-  static bool isTimeTaked = false;
-  int tolerance = 10;
-  int degAdjustLeftPivot = 8;
-  int degAdjustRightPivot = 12;
-  static long initL;
-  static long initR;
-  int waitTime = 1000;  
-  static unsigned long exitTime = 0;
-
-  int degToSpin = callingState == SEGC? 188 : 95;
-  float wheelDegGoal = degToSpin * FULL_SPIN_CIRC / CIRC_WHEEL;
-
-  if(!isSpinCalled){
-    callingState != SEGB? spinTask(degToSpin * -1) : spinTask(degToSpin);
-    isSpinCalled = true;
-    initL = encoderLeft.getCurPos();
-    initR = encoderRight.getCurPos();
-  }
-
-  long moveLeft = abs(encoderLeft.getCurPos() - initL);
-  long moveRight = abs(encoderRight.getCurPos() - initR);
-  float moved = (moveLeft + moveRight) / 2.0;
-
-  // if(moved >= wheelDegGoal - tolerance){
-  //   isSpinCalled = false;
-  //   currentState = FIN;
-  //   if(callingState == SEGA) currentState = SEGB;
-  //   else if(callingState == SEGB) currentState = SEGC;
-  // }
-
-  // set the time to wait for switch
-  if(moved >= (wheelDegGoal - tolerance) && !isTimeTaked){
-    exitTime = ct + waitTime;
-    isTimeTaked = true;
-  }
-
-  if(ct >= exitTime && isTimeTaked){
-    isSpinCalled = false;
-    isTimeTaked = false;
-    currentState = FIN;
-    if(callingState == SEGA) currentState = SEGB;
-    else if(callingState == SEGB) currentState = SEGC;
-  }
-
-  // Serial.print("MOV L: ");
-  // Serial.print(moveLeft);
-  // Serial.print(" MOV R: ");
-  // Serial.print(moveRight);
-  // Serial.print(" WheelDeg: ");
-  // Serial.print(wheelDegGoal);
-  // Serial.print(" moved: ");
-  // Serial.println(moved);  
 }
 
 void segA_And_SegCState(int distToMove = 1000) {
@@ -458,11 +456,10 @@ void segBState() {
 
   if(distanceUltraSon <= TOO_NEAR_DIST){
 
-    stop();
+    stopMotors();
     currentState = PIVOT;
     completedLedsProgession++;
     completedLedsTask();
-    Serial.println("Ça rentre");
     firstCall = true;
 
   }else{
@@ -470,12 +467,46 @@ void segBState() {
     if(firstCall){
       goStraight(100, firstCall);
       firstCall = false;
+      led.setColor(0,0); //----------------------------------------------------------------------------------
     }else{
       goStraight();
     }
   }
 
   progressiveBarTask(false);
+}
+
+void pivotState(AppState callingState, unsigned long ct) {
+  static bool firstTime = true;
+  static bool isDone = false;
+  static unsigned long exitTime = 0;
+  const unsigned long WAIT_TIME = 500;
+
+  // Angles exacts : même convention de signe que ton spinTask actuel
+  float angle;
+  if (callingState == SEGA)      angle = -90.0;
+  else if (callingState == SEGB) angle = 90.0;
+  else                           angle = -180.0;   // SEGC
+
+  if (firstTime) {
+    firstTime = false;
+    isDone = false;
+    pivotTask(ct, angle, PIVOT_SPEED, true);   // initialise la cible
+    return;
+  }
+
+  if (!isDone) {
+    isDone = pivotTask(ct, angle, PIVOT_SPEED);
+    if (isDone) exitTime = ct + WAIT_TIME;
+    return;
+  }
+
+  if (ct >= exitTime) {
+    firstTime = true;
+    currentState = FIN;
+    if (callingState == SEGA) currentState = SEGB;
+    else if (callingState == SEGB) currentState = SEGC;
+  }
 }
 
 void finState(unsigned long ct){
@@ -503,6 +534,7 @@ void finState(unsigned long ct){
   led.show();
 }
 
+
 void stateManagement(unsigned long ct){
 
   static AppState callingState;
@@ -515,7 +547,7 @@ void stateManagement(unsigned long ct){
 
     case SEGA:
       callingState = currentState;
-      segA_And_SegCState(distSegA);
+      segA_And_SegCState(distanceFoward);
       
     break;
 
@@ -527,7 +559,7 @@ void stateManagement(unsigned long ct){
 
     case SEGC:
       callingState = currentState;
-      segA_And_SegCState(distSegC);
+      segA_And_SegCState(distanceFoward);
       
     break;
 
